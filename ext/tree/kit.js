@@ -1,7 +1,7 @@
 // Creature kit: papercraft parts, forest-like shading, and baking a posed 3D
 // model into flat billboard cells (the Façade-style flattening). Used by the
 // birds in the forest and by the lab test pages (lab/fox.html, lab/bird.html).
-import * as THREE from 'three';
+import * as THREE from './vendor/three.module.js';
 
 export { THREE };
 

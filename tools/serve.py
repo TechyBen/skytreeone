@@ -1,6 +1,7 @@
-"""Serve dist/skytreeone for testing the content script on bsky.app without
-installing the extension: adds the CORS and Private Network Access headers
-Chrome needs before a public page may load scripts from localhost.
+"""Serve ext/ for trying the forest without installing the extension (the demo:
+http://localhost:8174/tree/index.html?saver&demo=1&wander=1), and for testing
+the content script on bsky.app: adds the CORS and Private Network Access
+headers Chrome needs before a public page may load scripts from localhost.
 
     python tools/serve.py [port]
 """
@@ -9,7 +10,7 @@ from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-DIST = Path(__file__).resolve().parent.parent / 'dist' / 'skytreeone'
+DIST = Path(__file__).resolve().parent.parent / 'ext'
 
 
 class Handler(SimpleHTTPRequestHandler):

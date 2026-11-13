@@ -6,6 +6,10 @@
 //   chatter=1             turn the birds on
 //   me=<did or handle>    whose follows to listen to
 //   parent=<origin>       the Bluesky page (where open/leave messages go)
+// and for trying it without the extension (tools/serve.py):
+//   demo=1                made-up demo birds instead, clearly labelled, with
+//                         their own seen/read marks and no network use
+//   wander=1              start walking (on this page alone, a click walks)
 //
 // Sources, all public and keyless: app.bsky.graph.getFollows on the public
 // AppView for the follow list (cached for 6 hours), and Jetstream, Bluesky's
@@ -13,7 +17,9 @@
 
 const q = new URLSearchParams(location.search);
 const ME = (q.get('me') || '').trim();
-const CHATTER = q.get('chatter') === '1' && !!ME;
+const DEMO = q.get('demo') === '1';
+const CHATTER = DEMO || (q.get('chatter') === '1' && !!ME);
+const ALONE = parent === window; // the forest page opened by itself, not behind Bluesky
 const PARENT = q.get('parent') || 'https://bsky.app';
 const APPVIEW = 'https://public.api.bsky.app/xrpc/';
 const JETSTREAMS = [
@@ -44,7 +50,7 @@ const { THREE, scene, camera, controls, U } = api;
 
 // ---------------------------------------------------------------- feed
 let follows = null;
-let status = CHATTER ? 'finding who you follow…' : 'sign in to bsky.app (or set your handle in the popup) for chatter';
+let status = DEMO ? 'demo birds' : CHATTER ? 'finding who you follow…' : 'sign in to bsky.app (or set your handle in the popup) for chatter';
 
 async function xrpc(method, params) {
   const u = new URL(APPVIEW + method);
@@ -143,7 +149,7 @@ function nextFromPool() {
 }
 
 // Seen (green outline) and read (blue), remembered between visits.
-const MARK_KEY = 'skytree:marks';
+const MARK_KEY = DEMO ? 'skytree:demo:marks' : 'skytree:marks';
 let marks = {};
 try { marks = JSON.parse(localStorage.getItem(MARK_KEY)) || {}; } catch { /* none yet */ }
 let marksDirty = false;
@@ -163,7 +169,41 @@ function saveMarks() {
 }
 setInterval(saveMarks, 5000);
 
-if (CHATTER) {
+// ---------------------------------------------------------------- demo
+// Made-up birds for trying the forest without signing in. They say they're
+// demos, use no network, and keep their own seen/read marks.
+const DEMO_PEOPLE = [
+  ['demo-wren.example', 'Demo Wren'], ['demo-robin.example', 'Demo Robin'], ['demo-finch.example', 'Demo Finch'],
+  ['demo-thrush.example', 'Demo Thrush'], ['demo-tit.example', 'Demo Tit'], ['demo-warbler.example', 'Demo Warbler'],
+];
+const DEMO_COLOURS = [[150, 110, 70], [214, 110, 60], [210, 180, 60], [130, 120, 100], [90, 140, 200], [120, 160, 80]];
+const DEMO_LINES = [
+  'This is a demo post. Sign in to bsky.app and the birds here are new posts from the people you follow.',
+  'Demo post: walk with W A S D (Shift to run) and drag to look round. Arrow keys turn.',
+  'Demo post: walk up to a bird and its post opens here. On Bluesky, Enter opens the thread (not for demo posts).',
+  'Demo post: a soft green glow means you\u2019ve seen a bird, blue that you\u2019ve read it. It remembers.',
+  'Demo post: step right up to a bird without opening it and it flies off to a branch nearby.',
+  'Demo post: new posts land first; older ones come round again as you walk on.',
+  'Demo post: the sun, moon and stars follow your real time and rough location.',
+  'Demo post: Esc stops walking. Click the forest to walk again.',
+];
+function demoFeed(onPost) {
+  let k = 0;
+  const next = () => {
+    const i = k % DEMO_PEOPLE.length;
+    onPost({ did: `did:demo:${i}`, rkey: `demo${k}`, text: DEMO_LINES[k % DEMO_LINES.length], media: false, at: Date.now() - Math.max(0, 8 - k) * 300e3, demo: true });
+    k++;
+  };
+  for (let i = 0; i < 8; i++) next();
+  setInterval(next, 45000);
+}
+
+if (DEMO) {
+  const people = {};
+  DEMO_PEOPLE.forEach(([h, n], i) => { people[`did:demo:${i}`] = [h, n, '']; });
+  follows = { at: Date.now(), people };
+  demoFeed(arrive);
+} else if (CHATTER) {
   loadFollows(ME)
     .then(c => {
       follows = c;
@@ -223,6 +263,12 @@ function account(did) {
   a = { did, rgb: [fallback.r * 255, fallback.g * 255, fallback.b * 255], size: 1, canvas, tex, baked: '' };
   accounts.set(did, a);
   dirty.add(a);
+  if (did.startsWith('did:demo:')) {
+    const i = +did.slice(9);
+    a.rgb = DEMO_COLOURS[i % DEMO_COLOURS.length];
+    a.size = 1 + (i % 3) * 0.25;
+    return a;
+  }
   const avatar = follows?.people[did]?.[2];
   if (avatar) avatarColour(avatar).then(rgb => { a.rgb = rgb; dirty.add(a); }).catch(() => {});
   xrpc('app.bsky.actor.getProfile', { actor: did }).then(p => { a.size = sizeFor(p.followersCount || 0); }).catch(() => {});
@@ -722,8 +768,11 @@ function select(b) {
   b.mat.uniforms.uSel.value = 1;
   const [handle, name] = follows.people[b.post.did] || [b.post.did, ''];
   card.querySelector('b').textContent = name || handle;
-  card.querySelector('span').textContent = `@${handle} · ${ago(b.post.at)}`;
+  card.querySelector('span').textContent = `@${handle} \u00b7 ${ago(b.post.at)}${b.post.demo ? ' \u00b7 demo' : ''}`;
   card.querySelector('p').textContent = b.post.text || (b.post.media ? '(image or link)' : '');
+  card.querySelector('.hint').innerHTML = b.post.demo
+    ? 'A demo post: no thread to open \u00b7 <kbd>Esc</kbd> stops walking'
+    : '<kbd>Enter</kbd> open thread \u00b7 <kbd>Esc</kbd> back to the feed';
 }
 
 function setWander(on) {
@@ -746,6 +795,7 @@ function setWander(on) {
 
 function leave() {
   setWander(false);
+  if (ALONE) return;
   parent.postMessage({ type: 'skytree:leave' }, PARENT);
 }
 
@@ -761,6 +811,7 @@ addEventListener('keydown', e => {
   if (e.code === 'Escape') { e.preventDefault(); leave(); return; }
   if (e.code === 'Enter' && selected) {
     e.preventDefault();
+    if (selected.post.demo) { markPost(selected.post, 2); return; }
     const { did, rkey } = selected.post;
     const handle = follows?.people[did]?.[0] || '';
     markPost(selected.post, 2);
@@ -778,6 +829,7 @@ addEventListener('keyup', e => {
 addEventListener('blur', () => keys.clear());
 
 addEventListener('pointerdown', e => {
+  if (!wander && ALONE) { setWander(true); return; }
   if (!wander) return;
   dragging = { x: e.clientX, y: e.clientY };
   document.body.classList.add('dragging');
@@ -835,6 +887,19 @@ api.beforeFrame.push(now => {
   if (wander) updateWander(t, dt);
   if (CHATTER) updateBirds(t, dt);
 });
+
+// On its own (the demo), say how to start walking, and start if asked.
+if (ALONE) {
+  const tip = document.createElement('div');
+  tip.id = 'skytree-tip';
+  tip.textContent = DEMO ? 'Demo forest \u00b7 click to walk' : 'Click to walk';
+  tip.style.cssText = 'position:fixed;left:50%;bottom:22px;transform:translateX(-50%);padding:6px 14px;border-radius:999px;' +
+    'background:rgba(12,14,20,.55);color:#ecebf3;font:12px system-ui,sans-serif;pointer-events:none;';
+  document.body.append(tip);
+  const showTip = () => { tip.style.display = wander ? 'none' : 'block'; };
+  setInterval(showTip, 300);
+  if (q.get('wander') === '1') setWander(true);
+}
 
 // Tell the page we're up (it sends the sound setting, and resumes wander
 // mode if the forest was reloaded mid-walk).

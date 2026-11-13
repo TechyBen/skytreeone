@@ -1,0 +1,868 @@
+import * as THREE from '../vendor/three.module.js';
+import { OrbitControls } from '../vendor/OrbitControls.js';
+import GUI from '../vendor/lil-gui.esm.min.js';
+import { PRESETS, presetById } from './presets.js';
+import { SPECIES, generateTree } from './treegen.js';
+import { buildBranchGeometry, buildLeafGeometry, buildImpostorQuad } from './treemesh.js';
+import { makeLeafAtlas, makeBarkTexture, makeGroundTexture } from './leafgen.js';
+import {
+  U, buildRampTexture, dataTexture, makeBranchMaterial, makeLeafMaterial, makeImpostorMaterial,
+  makeGroundMaterial, makeSkyMaterial, makeMotesMaterial,
+} from './materials.js';
+import { bakeImpostor, makeShadowTarget, renderShadowMap } from './impostor.js';
+import { Pipeline } from './post.js';
+import { Ambience } from './ambience.js';
+import { sunPosition, moonPosition, estimateLocation, daylight, siderealTime } from './sun.js';
+import { makeStars } from './stars.js';
+import { makeMoon } from './moon.js';
+import { makePrecip } from './precip.js';
+import { fetchWeather, cachedWeather, lookupTown, toScene, round1, windVector } from './weather.js';
+import { Rng, fbm, hash2 } from './rng.js';
+
+// Palette hex values are used as-is (no sRGB<->linear conversion): PS1 style.
+THREE.ColorManagement.enabled = false;
+
+const params = {
+  preset: PRESETS[0].id,
+  // render
+  pixelHeight: 240, vertexSnap: 1, affine: true, colorBits: 5, dither: 1,
+  rampSteps: 6, rampDither: 0.8,
+  // light & fog (filled from the preset)
+  sunElevation: 14, sunAzimuth: 6, sunStrength: 0.75, godrays: 0.6,
+  fogDensity: 0.03, fogBase: 2, fogFalloff: 0.08, fogNoise: 0.35,
+  shadows: true, shadowRes: 512, shadowSize: 70,
+  motes: true, wind: 1,
+  // forest
+  seed: 7, trees: 450, shrubs: 300, ferns: 1400, variants: 3, polyDetail: 1,
+  lodDistance: 38, impostorViews: 8, impostorRes: 96,
+  // leaves
+  leafTile: 32, leafDensity: 1, leafScale: 1,
+  showAtlases: false,
+  // sound
+  sound: false, volume: 0.6, windVolume: 0.35, birdVolume: 0.6,
+  // real-time sun (location only used locally for the sun's position)
+  realSun: false, latitude: 51.5, longitude: -0.1, stars: 1, timeShift: 0,
+  // weather: 'off' | 'live' (Open-Meteo) | 'manual' (sliders below)
+  weather: 'off', town: '', wCloud: 0, wRain: 0, wSleet: 0, wHail: 0, wSnow: 0, wVisibility: 0, wWind: 0.5, wWindFrom: 245,
+};
+
+// ?saver runs the unattended screensaver mode (see saver.js); a few
+// render settings can also be overridden from the query string.
+const query = new URLSearchParams(location.search);
+const SAVER = query.has('saver');
+if (query.has('px')) params.pixelHeight = +query.get('px') || params.pixelHeight;
+const maxFps = +(query.get('fps') || 0);
+{
+  const est = estimateLocation();
+  params.latitude = query.has('lat') && isFinite(+query.get('lat')) && query.get('lat') !== '' ? +query.get('lat') : est.lat;
+  params.longitude = query.has('lon') && isFinite(+query.get('lon')) && query.get('lon') !== '' ? +query.get('lon') : est.lon;
+  params.realSun = query.has('realsun') ? query.get('realsun') !== '0' : SAVER;
+  if (query.get('weather') === '1') params.weather = 'live';
+}
+
+const AREA = 120; // half-size of the forest square, metres
+
+// ---------------------------------------------------------------- renderer
+const canvas = document.getElementById('view');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance' });
+renderer.setPixelRatio(1);
+renderer.info.autoReset = false;
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(62, 4 / 3, 0.1, 600);
+camera.position.set(0, 1.7, 14);
+const controls = new OrbitControls(camera, canvas);
+controls.target.set(0, 5, -4);
+controls.enableDamping = true;
+controls.maxDistance = 120;
+
+const pipe = new Pipeline(renderer);
+let shadowRT = makeShadowTarget(params.shadowRes);
+const lightCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 1, 300);
+
+const barkTex = dataTexture(makeBarkTexture(3), true);
+const groundTex = dataTexture(makeGroundTexture(5), true);
+const branchMat = makeBranchMaterial(barkTex);
+
+// ---------------------------------------------------------------- terrain
+// Per-scene relief (from the preset): `amp` scales the rolling noise, `slope`
+// tilts the land outside the clearing along compass direction `dir` (a
+// hillside, rising on one side and falling away on the other), and `ravine`
+// cuts a winding gully across the far side. The clearing stays level.
+const relief = { amp: 8, slope: 0, dir: 0, ravine: 0 };
+function terrainHeight(x, z) {
+  const r = Math.hypot(x, z);
+  const S = THREE.MathUtils.smoothstep;
+  const rough = 0.25 + 0.75 * S(r, 8, 40);
+  let h = (fbm(x * 0.015 + 50, z * 0.015 + 50, 4, 3) - 0.5) * relief.amp * rough
+    + Math.pow(Math.max(0, r - 30) / 90, 2) * 14;
+  if (relief.slope || relief.ravine) {
+    const c = Math.cos(relief.dir), sn = Math.sin(relief.dir);
+    const along = x * c + z * sn, across = -x * sn + z * c;
+    h += along * relief.slope * S(r, 9, 30);
+    if (relief.ravine) {
+      const d = along + 24 + (fbm(across * 0.02 + 3, 7, 3, 11) - 0.5) * 30;
+      h -= relief.ravine * Math.exp(-(d * d) / 120) * S(r, 12, 26);
+    }
+  }
+  return h;
+}
+
+const groundGeo = new THREE.PlaneGeometry(AREA * 2 + 60, AREA * 2 + 60, 120, 120);
+groundGeo.rotateX(-Math.PI / 2);
+function shapeGround() {
+  const p = groundGeo.attributes.position;
+  for (let i = 0; i < p.count; i++) p.setY(i, terrainHeight(p.getX(i), p.getZ(i)));
+  p.needsUpdate = true;
+  groundGeo.computeVertexNormals();
+  groundGeo.computeBoundingSphere();
+}
+shapeGround();
+
+// Trails: a few winding paths out from the clearing (per preset). Trees keep
+// clear of them, undergrowth mostly does, and the ground shows trodden
+// litter along them (a mask texture over the forest square).
+let trails = [];
+const TRAIL_RES = 256;
+const trailTex = new THREE.DataTexture(new Uint8Array(TRAIL_RES * TRAIL_RES * 4), TRAIL_RES, TRAIL_RES);
+trailTex.magFilter = trailTex.minFilter = THREE.LinearFilter;
+function makeTrails(n, seed) {
+  const rng = new Rng(seed * 13 + 5);
+  trails = [];
+  for (let i = 0; i < n; i++) {
+    let a = (i / n) * Math.PI * 2 + rng.float(-0.4, 0.4);
+    let x = Math.cos(a) * 5, z = Math.sin(a) * 5, head = a;
+    const pts = [[x, z]];
+    while (Math.hypot(x, z) < AREA + 10 && pts.length < 200) {
+      // Wander, but keep heading out of the forest.
+      head += rng.float(-0.35, 0.35) + 0.15 * Math.sin(Math.atan2(z, x) - head);
+      x += Math.cos(head) * 2;
+      z += Math.sin(head) * 2;
+      pts.push([x, z]);
+    }
+    trails.push(pts);
+  }
+  // Mask: 1 on a trail centre line, fading to 0 about 1.3 m out.
+  const data = trailTex.image.data, half = AREA + 30;
+  data.fill(0);
+  for (const pts of trails) {
+    for (const [px, pz] of pts) {
+      const cx = ((px / half) * 0.5 + 0.5) * TRAIL_RES, cz = ((pz / half) * 0.5 + 0.5) * TRAIL_RES;
+      const rad = 2;
+      for (let ty = Math.floor(cz - rad); ty <= cz + rad; ty++) {
+        for (let tx = Math.floor(cx - rad); tx <= cx + rad; tx++) {
+          if (tx < 0 || ty < 0 || tx >= TRAIL_RES || ty >= TRAIL_RES) continue;
+          const wx = ((tx + 0.5) / TRAIL_RES - 0.5) * 2 * half, wz = ((ty + 0.5) / TRAIL_RES - 0.5) * 2 * half;
+          const v = Math.round(255 * (1 - THREE.MathUtils.smoothstep(Math.hypot(wx - px, wz - pz), 0.5, 1.6)));
+          const o = (ty * TRAIL_RES + tx) * 4;
+          if (v > data[o]) data[o] = v;
+        }
+      }
+    }
+  }
+  trailTex.needsUpdate = true;
+  U.uTrail.value = trailTex;
+  U.uTrailArea.value = half;
+}
+// Distance from (x, z) to the nearest trail point (they're 2 m apart).
+function trailDist(x, z) {
+  let d = Infinity;
+  for (const pts of trails) for (const [px, pz] of pts) d = Math.min(d, Math.hypot(x - px, z - pz));
+  return d;
+}
+const ground = new THREE.Mesh(groundGeo, makeGroundMaterial(groundTex));
+ground.frustumCulled = false;
+scene.add(ground);
+
+const sky = new THREE.Mesh(new THREE.SphereGeometry(400, 24, 12), makeSkyMaterial());
+sky.frustumCulled = false;
+sky.renderOrder = -1;
+scene.add(sky);
+
+const stars = makeStars();
+scene.add(stars);
+const moon = makeMoon();
+scene.add(moon);
+const precip = makePrecip();
+scene.add(precip.group);
+
+const motes = (() => {
+  const n = 600, r = new Rng(99);
+  const pos = new Float32Array(n * 3), seed = new Float32Array(n);
+  for (let i = 0; i < n; i++) { pos.set([r.next(), r.next(), r.next()], i * 3); seed[i] = r.next(); }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setAttribute('aSeed', new THREE.BufferAttribute(seed, 1));
+  const m = new THREE.Points(g, makeMotesMaterial());
+  m.frustumCulled = false;
+  return m;
+})();
+scene.add(motes);
+
+// ---------------------------------------------------------------- forest
+const forest = new THREE.Group();
+scene.add(forest);
+let variants = [];
+let leafAtlases = {}; // species -> { tex, img }
+
+const preset = () => presetById(params.preset);
+// The sky's clock: real time plus the preview shift (in days).
+const skyNow = () => new Date(Date.now() + params.timeShift * 86400e3);
+
+function dirFrom(elDeg, azDeg) {
+  const el = THREE.MathUtils.degToRad(elDeg), az = THREE.MathUtils.degToRad(azDeg);
+  return new THREE.Vector3(Math.sin(az) * Math.cos(el), Math.sin(el), -Math.cos(az) * Math.cos(el));
+}
+
+// Weather effects currently applied (see weather.js toScene). `fog` is a
+// density or null (keep the preset's); the rest are 0..1.
+// `dir` is the unit [x, z] the wind blows toward (default: from the west-south-west).
+const CALM = { cloud: 0, fog: null, rain: 0, sleet: 0, hail: 0, snow: 0, wind: 0.5, dir: windVector(245), label: '' };
+const weather = { scene: { ...CALM }, status: 'off', fetchedAt: 0 };
+
+// Light for the current sun elevation. Below the horizon the scene dims toward
+// a blue night tint and the real moon takes over as the light (brighter near
+// full), so shadows and light shafts keep working at night. Cloud dims both.
+const NIGHT_TINT = new THREE.Color(0.17, 0.2, 0.32);
+const MOON_COLOR = new THREE.Color(0.62, 0.7, 0.92);
+const light = {
+  dir: new THREE.Vector3(), strength: 1, godrays: 1, day: 1, tint: new THREE.Color(), moon: false,
+  fog: 0.03, wind: 1, moonPos: null, sunTrue: new THREE.Vector3(),
+};
+function computeLight() {
+  const el = params.sunElevation, ss = THREE.MathUtils.smoothstep, ws = weather.scene;
+  const now = skyNow();
+  const mp = (light.moonPos = moonPosition(now, params.latitude, params.longitude));
+  const st = sunPosition(now, params.latitude, params.longitude);
+  light.sunTrue.copy(dirFrom(st.elevation, st.azimuth));
+  light.day = daylight(el);
+  light.moon = el < -2;
+  // A moonlit night is a little brighter than a moonless one.
+  const moonUp = ss(mp.elevation, -1, 8) * mp.fraction * (1 - ws.cloud * 0.8);
+  light.tint.copy(NIGHT_TINT).multiplyScalar(0.75 + 0.5 * moonUp).lerp(new THREE.Color(1, 1, 1), light.day);
+  if (light.moon) {
+    const up = mp.elevation > -1;
+    light.dir.copy(up ? dirFrom(Math.max(mp.elevation, 3), mp.azimuth) : dirFrom(60, 0));
+    light.strength = Math.max(0.02, 0.26 * (0.25 + 0.75 * mp.fraction) * ss(mp.elevation, -1, 8)) * (1 - ss(el, -10, -2));
+  } else {
+    light.dir.copy(dirFrom(el, params.sunAzimuth));
+    light.strength = params.sunStrength * ss(el, -2, 6);
+  }
+  light.strength *= 1 - 0.75 * ws.cloud;
+  const shafts = light.moon ? 0.5 * moonUp * (1 - light.day) : Math.max(0.15, ss(el, -2, 4));
+  const wet = Math.min(1, ws.rain + ws.sleet + ws.hail);
+  light.godrays = params.godrays * shafts * Math.pow(1 - ws.cloud, 1.5) * (1 - 0.7 * wet);
+  // Fog: lean toward the reported visibility, thicker in rain and snow.
+  light.fog = (ws.fog === null ? params.fogDensity : params.fogDensity * 0.4 + ws.fog * 0.6) * (1 + 0.6 * ws.rain + 0.7 * ws.sleet + 0.4 * ws.hail + 0.8 * ws.snow);
+  return light;
+}
+
+// Real-time sun: update elevation/azimuth from the clock and location.
+function updateRealSun() {
+  const { elevation, azimuth } = sunPosition(skyNow(), params.latitude, params.longitude);
+  params.sunElevation = Math.round(elevation * 10) / 10;
+  params.sunAzimuth = Math.round(azimuth * 10) / 10;
+}
+
+function disposeForest() {
+  for (const v of variants) {
+    v.branchGeo.dispose();
+    v.leafGeo?.dispose();
+    v.impGeo?.dispose();
+    v.impMat?.dispose();
+    v.imp?.rt.dispose();
+  }
+  for (const k in leafAtlases) { leafAtlases[k].tex.dispose(); leafAtlases[k].mat.dispose(); }
+  forest.clear();
+  variants = [];
+  leafAtlases = {};
+}
+
+function bake(v) {
+  v.imp?.rt.dispose();
+  v.imp = bakeImpostor(renderer, v, { views: params.impostorViews, cellH: params.impostorRes });
+  if (v.impMat) {
+    v.impMat.uniforms.uAtlas.value = v.imp.texture;
+    v.impMat.uniforms.uViews.value = v.imp.views;
+  }
+}
+
+function rebakeAll() {
+  const t0 = performance.now();
+  variants.forEach(bake);
+  bakedSun = { az: params.sunAzimuth, el: params.sunElevation };
+  status.bake = performance.now() - t0;
+}
+
+function buildForest() {
+  const t0 = performance.now();
+  disposeForest();
+  const p = preset();
+  const rng = new Rng(params.seed);
+  const mix = { ...p.forest };
+  const speciesIds = Object.keys(mix).filter(k => mix[k] > 0);
+  if (params.shrubs > 0 && p.shrubs > 0) speciesIds.push('shrub');
+  if (params.ferns > 0 && p.ferns > 0) speciesIds.push('fern');
+
+  // The scene's land and trails.
+  Object.assign(relief, { amp: 8, slope: 0, dir: 0, ravine: 0 }, p.relief || {});
+  shapeGround();
+  makeTrails(p.trails || 0, params.seed);
+
+  // Leaf atlases: one per species, shared by all its variants.
+  for (const sid of speciesIds) {
+    const sp = SPECIES[sid];
+    if (!sp.leaf) continue;
+    const img = makeLeafAtlas(sp.leaf, {
+      tile: params.leafTile, density: params.leafDensity, scale: params.leafScale,
+      seed: params.seed * 31 + sid.length * 7 + sid.charCodeAt(0),
+    });
+    const tex = dataTexture(img);
+    leafAtlases[sid] = { img, tex, mat: makeLeafMaterial(tex, sp.ramp), kind: sp.leaf };
+  }
+
+  // Variants.
+  const bySpecies = {};
+  for (const sid of speciesIds) {
+    bySpecies[sid] = [];
+    for (let i = 0; i < params.variants; i++) {
+      const tree = generateTree(sid, Math.floor(hash2(params.seed, i, sid.charCodeAt(0) + sid.length * 101) * 1e9));
+      const v = {
+        species: sid, tree,
+        branchGeo: buildBranchGeometry(tree, params.polyDetail),
+        leafGeo: tree.clusters.length && leafAtlases[sid] ? buildLeafGeometry(tree, params.leafTile) : null,
+        branchMat, leafMat: leafAtlases[sid]?.mat, instances: [],
+      };
+      bySpecies[sid].push(v);
+      variants.push(v);
+    }
+  }
+
+  // Placement: jittered grid thinned by a density noise (natural gaps),
+  // with a clearing around the start position. Sizes follow a Weibull.
+  const place = (sid, x, z, scale) => {
+    const list = bySpecies[sid];
+    const v = list[rng.int(0, list.length - 1)];
+    const pos = new THREE.Vector3(x, terrainHeight(x, z) - 0.1, z);
+    const m = new THREE.Matrix4().compose(pos,
+      new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), rng.float(0, Math.PI * 2)),
+      new THREE.Vector3(scale, scale, scale));
+    v.instances.push({ pos, m, scale });
+  };
+  const treeMix = Object.fromEntries(Object.entries(mix).filter(([, w]) => w > 0));
+  if (Object.keys(treeMix).length && params.trees > 0) {
+    // Denser scenes (`density`) pack more trees in; `gaps` sets how much of
+    // the forest is left open.
+    const cell = (AREA * 2) / Math.sqrt((params.trees * (p.density ?? 1)) / 0.75);
+    for (let gz = -AREA; gz < AREA; gz += cell) {
+      for (let gx = -AREA; gx < AREA; gx += cell) {
+        const x = gx + rng.float(0.1, 0.9) * cell, z = gz + rng.float(0.1, 0.9) * cell;
+        if (Math.hypot(x, z) < (p.clearing ?? 9)) continue;
+        if (fbm(x * 0.03 + 9, z * 0.03 + 9, 3, params.seed) < (p.gaps ?? 0.36)) continue;
+        if (trails.length && trailDist(x, z) < 2.2) continue;
+        place(rng.weighted(treeMix), x, z, 0.75 + rng.weibull(2.2, 0.35));
+      }
+    }
+  }
+  if (bySpecies.shrub) {
+    const n = Math.round(params.shrubs * p.shrubs);
+    for (let i = 0; i < n; i++) {
+      const a = rng.float(0, Math.PI * 2), r = 4 + Math.pow(rng.next(), 0.7) * (AREA - 4);
+      const x = Math.cos(a) * r, z = Math.sin(a) * r;
+      if (trails.length && trailDist(x, z) < 1.2) continue;
+      place('shrub', x, z, rng.float(0.7, 1.4));
+    }
+  }
+  // Ferns grow in drifts (a patch noise), thick in places, never on a trail
+  // and thin in the clearing.
+  if (bySpecies.fern) {
+    const n = Math.round(params.ferns * p.ferns);
+    for (let i = 0, tries = 0; i < n && tries < n * 6; tries++) {
+      // Weighted toward the middle, where you are.
+      const a = rng.float(0, Math.PI * 2), r = 2.5 + Math.pow(rng.next(), 1.3) * (AREA - 2.5);
+      const x = Math.cos(a) * r, z = Math.sin(a) * r;
+      const patch = fbm(x * 0.06 + 31, z * 0.06 + 17, 3, params.seed + 7);
+      if (patch < 0.36) continue;
+      if (trails.length && trailDist(x, z) < 1.0) continue;
+      place('fern', x, z, rng.float(0.8, 1.35));
+      i++;
+    }
+  }
+
+  // Instanced meshes per variant: near (branches + leaf cards) and far (impostor).
+  for (const v of variants) {
+    const n = Math.max(1, v.instances.length);
+    v.fadeNear = new THREE.InstancedBufferAttribute(new Float32Array(n), 1).setUsage(THREE.DynamicDrawUsage);
+    v.fadeFar = new THREE.InstancedBufferAttribute(new Float32Array(n), 1).setUsage(THREE.DynamicDrawUsage);
+    bake(v);
+    v.branchGeo.setAttribute('aFade', v.fadeNear);
+    v.near = new THREE.InstancedMesh(v.branchGeo, branchMat, n);
+    v.near.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    v.near.frustumCulled = false;
+    v.near.count = 0;
+    forest.add(v.near);
+    if (v.leafGeo) {
+      v.leafGeo.setAttribute('aFade', v.fadeNear);
+      v.leaves = new THREE.InstancedMesh(v.leafGeo, v.leafMat, n);
+      v.leaves.instanceMatrix = v.near.instanceMatrix;
+      v.leaves.frustumCulled = false;
+      v.leaves.count = 0;
+      forest.add(v.leaves);
+    }
+    v.impGeo = buildImpostorQuad();
+    v.impGeo.setAttribute('aFade', v.fadeFar);
+    v.impMat = makeImpostorMaterial(v.imp);
+    v.far = new THREE.InstancedMesh(v.impGeo, v.impMat, n);
+    v.far.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    v.far.frustumCulled = false;
+    v.far.count = 0;
+    forest.add(v.far);
+  }
+  bakedSun = { az: params.sunAzimuth, el: params.sunElevation };
+  status.build = performance.now() - t0;
+  status.instances = variants.reduce((s, v) => s + v.instances.length, 0);
+  if (params.showAtlases) showAtlases();
+}
+
+// Per frame: split each variant's instances into near / far with a dithered
+// cross-fade band just inside the LOD distance.
+function updateLod() {
+  const cam = camera.position;
+  const lod = params.lodDistance, band = Math.max(2, lod * 0.2);
+  for (const v of variants) {
+    let nn = 0, nf = 0;
+    for (const inst of v.instances) {
+      const d = cam.distanceTo(inst.pos);
+      const f = THREE.MathUtils.smoothstep(d, lod - band, lod);
+      if (f < 1) { v.near.setMatrixAt(nn, inst.m); v.fadeNear.array[nn++] = f; }
+      if (f > 0) { v.far.setMatrixAt(nf, inst.m); v.fadeFar.array[nf++] = f; }
+    }
+    v.near.count = nn;
+    if (v.leaves) v.leaves.count = nn;
+    v.far.count = nf;
+    v.near.instanceMatrix.needsUpdate = true;
+    v.far.instanceMatrix.needsUpdate = true;
+    v.fadeNear.needsUpdate = true;
+    v.fadeFar.needsUpdate = true;
+  }
+}
+
+// ---------------------------------------------------------------- uniforms
+let rampKey = '';
+function syncUniforms() {
+  const p = preset();
+  const L = computeLight();
+  U.uSunDir.value.copy(L.dir);
+  if (L.moon) U.uSunColor.value.copy(MOON_COLOR);
+  else U.uSunColor.value.set(p.sun.color);
+  U.uSunStrength.value = L.strength;
+  U.uAmbient.value.set(p.ambient).multiply(L.tint);
+  U.uMoss.value = p.moss || 0;
+  U.uFogColor.value.set(p.fog.color).multiply(L.tint);
+  // Overcast skies flatten toward the fog colour.
+  const ws = weather.scene;
+  U.uSkyTop.value.set(p.sky.top).multiply(L.tint).lerp(U.uFogColor.value, ws.cloud * 0.7);
+  U.uSkyHorizon.value.set(p.sky.horizon).multiply(L.tint).lerp(U.uFogColor.value, ws.cloud * 0.5);
+  stars.material.uniforms.uNight.value = Math.pow(1 - L.day, 1.5);
+  stars.material.uniforms.uStarScale.value = params.stars * Math.pow(1 - ws.cloud, 2);
+  const mu = moon.material.uniforms;
+  mu.uMoonDir.value.copy(dirFrom(L.moonPos.elevation, L.moonPos.azimuth));
+  mu.uSunTrue.value.copy(L.sunTrue);
+  mu.uDay.value = L.day;
+  mu.uCloud.value = ws.cloud;
+  mu.uFraction.value = L.moonPos.fraction;
+  precip.set(ws);
+  api.ambience?.setWeather?.({ rain: Math.min(1, ws.rain + 0.6 * ws.sleet), hail: ws.hail, wind: ws.wind });
+  U.uWindDir.value.set(ws.dir[0], ws.dir[1]);
+  U.uFogDensity.value = L.fog;
+  U.uFogBase.value = params.fogBase;
+  U.uFogFalloff.value = params.fogFalloff;
+  U.uFogNoise.value = params.fogNoise;
+  U.uAccentChance.value = p.accent;
+  U.uSnap.value = params.vertexSnap;
+  U.uAffine.value = params.affine ? 1 : 0;
+  U.uRampSteps.value = params.rampSteps;
+  U.uRampDither.value = params.rampDither;
+  // Base wind strength; the frame adds the gusts you can hear on top.
+  light.wind = params.wind * (0.4 + 1.2 * ws.wind);
+  U.uWind.value = light.wind;
+  U.uShadowOn.value = params.shadows ? 1 : 0;
+  const key = p.id + ':' + params.rampSteps;
+  if (key !== rampKey) {
+    U.uRamp.value?.dispose?.();
+    U.uRamp.value = buildRampTexture(p, params.rampSteps);
+    rampKey = key;
+  }
+  const pu = pipe.uniforms;
+  pu.uGodray.value = L.godrays;
+  pu.uSunColor.value.copy(U.uSunColor.value);
+  pu.uFogDensity.value = L.fog;
+  pu.uBits.value = params.colorBits;
+  pu.uDither.value = params.dither;
+  motes.visible = params.motes && ws.rain + ws.sleet + ws.hail + ws.snow < 0.05;
+}
+
+function applyPreset(id) {
+  const p = presetById(id);
+  Object.assign(params, {
+    preset: p.id, sunStrength: p.sun.strength, godrays: p.sun.godrays,
+    fogDensity: p.fog.density, fogBase: p.fog.base, fogFalloff: p.fog.falloff, fogNoise: p.fog.noise,
+  });
+  // With the real-time sun on, the clock decides where the sun is, not the preset.
+  if (params.realSun) updateRealSun();
+  else Object.assign(params, { sunElevation: p.sun.elevation, sunAzimuth: p.sun.azimuth });
+  syncUniforms();
+  gui?.controllersRecursive().forEach(c => c.updateDisplay());
+  document.querySelectorAll('#presets button').forEach(b => b.classList.toggle('on', b.dataset.id === p.id));
+  buildForest();
+}
+
+function resize() {
+  const h = Math.round(params.pixelHeight);
+  const w = Math.max(1, Math.round((h * innerWidth) / innerHeight));
+  renderer.setSize(w, h, false);
+  pipe.setSize(w, h);
+  U.uRes.value.set(w, h);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+addEventListener('resize', resize);
+
+// ---------------------------------------------------------------- UI
+const status = { build: 0, bake: 0, instances: 0 };
+
+const pills = document.getElementById('presets');
+for (const p of PRESETS) {
+  const b = document.createElement('button');
+  b.textContent = p.name;
+  b.dataset.id = p.id;
+  b.onclick = () => applyPreset(p.id);
+  pills.appendChild(b);
+}
+
+const gui = new GUI({ title: 'treeps1' });
+gui.close();
+const rebuild = () => buildForest();
+{
+  const f = gui.addFolder('Render');
+  f.add(params, 'pixelHeight', 120, 720, 1).name('pixel height').onChange(resize);
+  f.add(params, 'vertexSnap', 0, 4, 0.25).name('vertex snap px').onChange(syncUniforms);
+  f.add(params, 'affine').name('affine textures').onChange(syncUniforms);
+  f.add(params, 'colorBits', 2, 8, 1).name('colour bits').onChange(syncUniforms);
+  f.add(params, 'dither', 0, 2, 0.05).name('screen dither').onChange(syncUniforms);
+  f.add(params, 'rampSteps', 2, 16, 1).name('palette steps').onChange(syncUniforms).onFinishChange(rebakeAll);
+  f.add(params, 'rampDither', 0, 2, 0.05).name('palette dither').onChange(syncUniforms).onFinishChange(rebakeAll);
+}
+{
+  const f = gui.addFolder('Light & fog');
+  const realSun = () => {
+    if (params.realSun) updateRealSun();
+    syncUniforms();
+    rebakeAll();
+    gui.controllersRecursive().forEach(c => c.updateDisplay());
+  };
+  f.add(params, 'realSun').name('real-time sun').onChange(realSun);
+  f.add(params, 'latitude', -66, 66, 0.1).onFinishChange(realSun);
+  f.add(params, 'longitude', -180, 180, 0.1).onFinishChange(realSun);
+  f.add(params, 'timeShift', -15, 15, 0.01).name('time shift (days)').onChange(() => { if (params.realSun) updateRealSun(); syncUniforms(); }).onFinishChange(realSun);
+  f.add(params, 'sunElevation', -15, 85, 0.1).name('sun elevation').onChange(syncUniforms).onFinishChange(rebakeAll);
+  f.add(params, 'sunAzimuth', 0, 360, 0.1).name('sun azimuth').onChange(syncUniforms).onFinishChange(rebakeAll);
+  f.add(params, 'sunStrength', 0, 2, 0.05).name('sun strength').onChange(syncUniforms).onFinishChange(rebakeAll);
+  f.add(params, 'godrays', 0, 2, 0.05).name('god rays').onChange(syncUniforms);
+  f.add(params, 'shadows').onChange(syncUniforms);
+  f.add(params, 'shadowRes', [128, 256, 512, 1024, 2048]).name('shadow res').onChange(v => {
+    shadowRT.dispose();
+    shadowRT = makeShadowTarget(v);
+  });
+  f.add(params, 'shadowSize', 20, 160, 1).name('shadow area m');
+  f.add(params, 'fogDensity', 0, 0.12, 0.001).name('fog density').onChange(syncUniforms);
+  f.add(params, 'fogBase', -5, 20, 0.5).name('fog base height').onChange(syncUniforms);
+  f.add(params, 'fogFalloff', 0, 0.4, 0.005).name('fog falloff').onChange(syncUniforms);
+  f.add(params, 'fogNoise', 0, 1, 0.01).name('fog noise').onChange(syncUniforms);
+  f.add(params, 'stars', 0, 4, 0.05).name('star brightness').onChange(syncUniforms);
+  f.add(params, 'motes').name('dust motes').onChange(syncUniforms);
+  f.add(params, 'wind', 0, 3, 0.05).onChange(syncUniforms);
+}
+{
+  const f = gui.addFolder('Forest');
+  f.add(params, 'seed', 1, 9999, 1).onFinishChange(rebuild);
+  f.add(params, 'trees', 0, 2000, 10).onFinishChange(rebuild);
+  f.add(params, 'shrubs', 0, 2000, 10).onFinishChange(rebuild);
+  f.add(params, 'ferns', 0, 4000, 50).onFinishChange(rebuild);
+  f.add(params, 'variants', 1, 6, 1).name('variants / species').onFinishChange(rebuild);
+  f.add(params, 'polyDetail', 0.5, 2, 0.25).name('branch sides x').onFinishChange(rebuild);
+  f.add(params, 'lodDistance', 0, 150, 1).name('billboard distance');
+  f.add(params, 'impostorViews', [4, 6, 8, 12, 16]).name('billboard angles').onChange(rebakeAll);
+  f.add(params, 'impostorRes', [24, 32, 48, 64, 96, 128, 192]).name('billboard px').onChange(rebakeAll);
+}
+{
+  const f = gui.addFolder('Leaves');
+  f.add(params, 'leafTile', [8, 12, 16, 24, 32, 48, 64]).name('cluster tile px').onChange(rebuild);
+  f.add(params, 'leafDensity', 0.1, 3, 0.05).name('leaf density').onFinishChange(rebuild);
+  f.add(params, 'leafScale', 0.4, 3, 0.05).name('leaf size').onFinishChange(rebuild);
+  f.add(params, 'showAtlases').name('show atlases').onChange(v => (v ? showAtlases() : hideAtlases()));
+}
+
+// ---------------------------------------------------------------- weather
+function applyReading(w, source) {
+  weather.scene = toScene(w);
+  weather.status = `${weather.scene.label} (${source})`;
+}
+async function refreshWeather() {
+  weather.fetchedAt = performance.now();
+  try {
+    const w = await fetchWeather(params.latitude, params.longitude);
+    applyReading(w, 'Open-Meteo ' + new Date(w.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+  } catch (e) {
+    const c = cachedWeather();
+    if (c) applyReading(c, 'cached, offline');
+    else weather.status = 'unavailable (' + e.message + ')';
+  }
+  syncUniforms();
+}
+function applyManualWeather() {
+  const v = params.wVisibility;
+  weather.scene = {
+    cloud: params.wCloud, rain: params.wRain, sleet: params.wSleet, hail: params.wHail, snow: params.wSnow,
+    wind: params.wWind, dir: windVector(params.wWindFrom),
+    fog: v > 0 ? Math.min(0.1, Math.max(0.003, 3.9 / v)) : null, label: 'manual',
+  };
+  weather.status = 'manual';
+  syncUniforms();
+}
+function setWeatherMode() {
+  if (params.weather === 'live') {
+    const c = cachedWeather(1);
+    if (c && Math.abs(c.lat - round1(params.latitude)) < 0.05 && Math.abs(c.lon - round1(params.longitude)) < 0.05) applyReading(c, 'cached');
+    refreshWeather();
+  } else if (params.weather === 'manual') applyManualWeather();
+  else { weather.scene = { ...CALM }; weather.status = 'off'; syncUniforms(); }
+}
+{
+  // Live weather sends only the rounded location (0.1 deg, ~10 km) to Open-Meteo.
+  const f = gui.addFolder('Weather');
+  f.close();
+  f.add(params, 'weather', ['off', 'live', 'manual']).name('weather').onChange(setWeatherMode);
+  f.add(params, 'town').name('town');
+  const look = {
+    async lookUp() {
+      if (!params.town.trim()) return;
+      try {
+        const t = await lookupTown(params.town.trim());
+        Object.assign(params, { town: t.label, latitude: t.lat, longitude: t.lon });
+        weather.status = `found ${t.label} (${t.lat}, ${t.lon})`;
+        if (params.realSun) updateRealSun();
+        syncUniforms();
+        rebakeAll();
+        if (params.weather === 'live') refreshWeather();
+      } catch (e) {
+        weather.status = 'town lookup: ' + e.message;
+      }
+      gui.controllersRecursive().forEach(c => c.updateDisplay());
+    },
+  };
+  f.add(look, 'lookUp').name('look up town');
+  const m = f.addFolder('Manual (for testing)');
+  const manual = () => { if (params.weather === 'manual') applyManualWeather(); };
+  m.add(params, 'wCloud', 0, 1, 0.01).name('cloud').onChange(manual);
+  m.add(params, 'wRain', 0, 1, 0.01).name('rain').onChange(manual);
+  m.add(params, 'wSleet', 0, 1, 0.01).name('sleet').onChange(manual);
+  m.add(params, 'wHail', 0, 1, 0.01).name('hail').onChange(manual);
+  m.add(params, 'wSnow', 0, 1, 0.01).name('snow').onChange(manual);
+  m.add(params, 'wVisibility', 0, 20000, 50).name('visibility m (0 = preset)').onChange(manual);
+  m.add(params, 'wWind', 0, 1, 0.01).name('wind').onChange(manual);
+  m.add(params, 'wWindFrom', 0, 360, 1).name('wind from (deg)').onChange(manual);
+}
+
+{
+  // Browsers only start audio from a click, which ticking the box provides.
+  const f = gui.addFolder('Sound');
+  let amb = null;
+  const vols = () => ({ master: params.volume, wind: params.windVolume, birds: params.birdVolume });
+  f.add(params, 'sound').name('forest sounds').onChange(on => {
+    if (on) { amb = new Ambience(vols()); amb.start(); api.ambience = amb; syncUniforms(); }
+    else { amb?.stop(); amb = null; api.ambience = null; }
+  });
+  f.add(params, 'volume', 0, 1, 0.01).onChange(() => amb?.setVolumes(vols()));
+  f.add(params, 'windVolume', 0, 1, 0.01).name('wind').onChange(() => amb?.setVolumes(vols()));
+  f.add(params, 'birdVolume', 0, 1, 0.01).name('birds').onChange(() => amb?.setVolumes(vols()));
+}
+
+// Debug overlay: leaf atlases (coloured through the palette) and baked impostors.
+const atlasBox = document.getElementById('atlas');
+function hideAtlases() { atlasBox.style.display = 'none'; atlasBox.innerHTML = ''; }
+function showAtlases() {
+  atlasBox.innerHTML = '';
+  atlasBox.style.display = 'block';
+  const p = preset();
+  const ramp = (row, t) => {
+    const stops = p.ramps[row];
+    const hex = stops[Math.min(stops.length - 1, Math.round(t * (stops.length - 1)))];
+    const n = parseInt(hex.slice(1), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  };
+  const addCanvas = (label, w, h, fill, zoom) => {
+    const div = document.createElement('div');
+    div.textContent = label;
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    c.style.width = w * zoom + 'px';
+    const ctx = c.getContext('2d');
+    const img = ctx.createImageData(w, h);
+    fill(img.data);
+    ctx.putImageData(img, 0, 0);
+    div.appendChild(c);
+    atlasBox.appendChild(div);
+  };
+  for (const [sid, a] of Object.entries(leafAtlases)) {
+    const row = SPECIES[sid].ramp ? 'leaf2' : 'leaf';
+    addCanvas(`${sid} leaves (${a.kind}, ${a.img.width}x${a.img.height})`, a.img.width, a.img.height, d => {
+      for (let i = 0; i < d.length; i += 4) {
+        const s = a.img.data;
+        if (!s[i + 3]) continue;
+        const rgb = ramp(s[i + 1] > 127 ? 'bark' : row, s[i] / 255);
+        d.set([...rgb, 255], i);
+      }
+    }, Math.max(2, Math.round(256 / a.img.width)));
+  }
+  for (const v of variants.filter((_, i) => i % params.variants === 0)) {
+    const { rt } = v.imp;
+    const w = rt.width, h = rt.height, buf = new Uint8Array(w * h * 4);
+    renderer.readRenderTargetPixels(rt, 0, 0, w, h, buf);
+    addCanvas(`${v.species} billboard (${params.impostorViews} views, ${w}x${h})`, w, h, d => {
+      for (let y = 0; y < h; y++) d.set(buf.subarray((h - 1 - y) * w * 4, (h - y) * w * 4), y * w * 4);
+    }, Math.max(1, Math.min(3, Math.floor(400 / w))));
+  }
+}
+
+// WASD / arrows walk the camera and its orbit target together.
+const keys = new Set();
+addEventListener('keydown', e => { if (!(e.target instanceof HTMLInputElement)) keys.add(e.code); });
+addEventListener('keyup', e => keys.delete(e.code));
+function walk(dt) {
+  const f = new THREE.Vector3();
+  camera.getWorldDirection(f);
+  f.y = 0;
+  f.normalize();
+  const r = new THREE.Vector3(-f.z, 0, f.x);
+  const m = new THREE.Vector3();
+  if (keys.has('KeyW') || keys.has('ArrowUp')) m.add(f);
+  if (keys.has('KeyS') || keys.has('ArrowDown')) m.sub(f);
+  if (keys.has('KeyD') || keys.has('ArrowRight')) m.add(r);
+  if (keys.has('KeyA') || keys.has('ArrowLeft')) m.sub(r);
+  if (m.lengthSq() === 0) return;
+  m.normalize().multiplyScalar(dt * (keys.has('ShiftLeft') ? 18 : 6));
+  // Follow the terrain so the head (camera + orbit target) keeps its height above ground.
+  const p = camera.position;
+  m.y = terrainHeight(p.x + m.x, p.z + m.z) - terrainHeight(p.x, p.z);
+  p.add(m);
+  controls.target.add(m);
+}
+
+// ---------------------------------------------------------------- loop
+const hud = document.getElementById('hud');
+const fwd = new THREE.Vector3();
+let last = performance.now(), fpsAcc = 0, fpsN = 0, fps = 0;
+const beforeFrame = []; // (now, dt) callbacks, used by saver mode
+let sunCheckedAt = -1e9, bakedSun = { az: 0, el: 0 };
+
+function frame(now) {
+  // Optional frame cap (?fps=30): a screensaver doesn't need 144 Hz all night.
+  if (maxFps && now - last < 1000 / maxFps - 2) { requestAnimationFrame(frame); return; }
+  const dt = Math.min(0.1, (now - last) / 1000);
+  last = now;
+  renderer.info.reset();
+  // Every 10 s: move the real sun (if on) and the moon. In the normal view,
+  // rebake billboards once the sun has moved a few degrees (~every 12 min);
+  // the screensaver rebakes at each scene change instead.
+  if (now - sunCheckedAt > 10000) {
+    sunCheckedAt = now;
+    if (params.realSun) updateRealSun();
+    syncUniforms();
+    if (params.realSun && !SAVER && Math.abs(params.sunAzimuth - bakedSun.az) + Math.abs(params.sunElevation - bakedSun.el) > 3) {
+      rebakeAll();
+      bakedSun = { az: params.sunAzimuth, el: params.sunElevation };
+    }
+  }
+  // Live weather every 30 minutes.
+  if (params.weather === 'live' && now - weather.fetchedAt > 30 * 60e3) refreshWeather();
+  for (const fn of beforeFrame) fn(now, dt);
+  walk(dt);
+  controls.update();
+  const floor = terrainHeight(camera.position.x, camera.position.z) + 0.6;
+  if (camera.position.y < floor) {
+    // Lift the target too, so the clamp doesn't tilt the view direction.
+    controls.target.y += floor - camera.position.y;
+    camera.position.y = floor;
+  }
+  U.uTime.value = now / 1000;
+  // Trees sway with the gusts you can hear (when sound is on).
+  if (api.ambience) U.uWind.value = light.wind * (0.6 + 0.9 * api.ambience.windLevel());
+  precip.setGround(terrainHeight(camera.position.x, camera.position.z));
+  // Stars turn with the real sidereal time at your location.
+  stars.material.uniforms.uLst.value = siderealTime(skyNow(), params.longitude);
+  stars.material.uniforms.uLat.value = THREE.MathUtils.degToRad(params.latitude);
+  updateLod();
+
+  // Shadow map follows the view, snapped to texels to avoid shimmering.
+  if (params.shadows) {
+    camera.getWorldDirection(fwd);
+    fwd.y = 0;
+    fwd.normalize();
+    const S = params.shadowSize, texel = S / params.shadowRes;
+    const c = camera.position.clone().addScaledVector(fwd, S * 0.3);
+    c.x = Math.round(c.x / texel) * texel;
+    c.z = Math.round(c.z / texel) * texel;
+    c.y = terrainHeight(c.x, c.z);
+    lightCam.left = -S / 2; lightCam.right = S / 2; lightCam.top = S / 2; lightCam.bottom = -S / 2;
+    lightCam.updateProjectionMatrix();
+    lightCam.position.copy(c).addScaledVector(U.uSunDir.value, 150);
+    lightCam.lookAt(c);
+    lightCam.updateMatrixWorld();
+    sky.visible = false;
+    stars.visible = moon.visible = precip.group.visible = false;
+    motes.visible = false;
+    renderShadowMap(renderer, scene, lightCam, shadowRT, 0.35);
+    sky.visible = true;
+    stars.visible = moon.visible = precip.group.visible = true;
+    motes.visible = params.motes;
+  }
+
+  renderer.setRenderTarget(pipe.rt);
+  renderer.setClearColor(U.uFogColor.value, 1);
+  renderer.clear();
+  renderer.render(scene, camera);
+  pipe.composite(camera, U.uSunDir.value);
+
+  fpsAcc += dt; fpsN++;
+  if (fpsAcc > 0.5) { fps = fpsN / fpsAcc; fpsAcc = 0; fpsN = 0; }
+  const info = renderer.info.render;
+  hud.textContent =
+    `${fps.toFixed(0)} fps  ${U.uRes.value.x}x${U.uRes.value.y}  ` +
+    `${(info.triangles / 1000).toFixed(1)}k tris  ${info.calls} draws\n` +
+    `${status.instances} plants, ${variants.length} variants  build ${status.build.toFixed(0)}ms  bake ${status.bake.toFixed(0)}ms
+` +
+    (light.moonPos ? `moon ${Math.round(light.moonPos.fraction * 100)}% lit, ${light.moonPos.elevation.toFixed(0)}° up  ·  ` : '') +
+    `weather: ${weather.status}`;
+  requestAnimationFrame(frame);
+}
+
+const api = {
+  THREE, params, camera, controls, U, pipe, gui, beforeFrame,
+  variants: () => variants, buildForest, rebakeAll, applyPreset, syncUniforms, terrainHeight,
+  light, updateRealSun, scene, moon, weather, setWeatherMode,
+};
+// Handy for poking at things from the devtools console.
+window.treeps1 = api;
+
+resize();
+if (SAVER) {
+  document.body.classList.add('saver');
+  gui.hide();
+  controls.enabled = false;
+  import('./saver.js').then(m => m.startSaver(api, query));
+} else {
+  applyPreset(params.preset);
+}
+if (params.weather !== 'off') setWeatherMode();
+requestAnimationFrame(frame);

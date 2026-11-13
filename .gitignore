@@ -1,0 +1,5 @@
+dist/
+lab/
+local/
+*.local.md
+__pycache__/

@@ -11,6 +11,8 @@ skytreeone has no servers of its own and no analytics. It never logs in as you a
 
 Those Bluesky services see your IP address and which accounts' pictures and posts are fetched, as any Bluesky app would. Nothing goes anywhere else.
 
+The demo (the forest page opened with `demo=1`, see the README) uses none of these: its birds are made up on your device.
+
 ## What it doesn't do
 
 - No tracking, no analytics, no ads, no data sold or shared.
@@ -22,4 +24,4 @@ Those Bluesky services see your IP address and which accounts' pictures and post
 - Your settings (sound, volume, scene length, an optional handle and so on) are kept in your browser's extension storage (`chrome.storage.sync`), which your browser may sync between your own devices if you're signed in to it.
 - The sun, moon and stars use an approximate location estimated on your device from its time zone. It never leaves your device.
 
-Questions: open an issue at https://github.com/TechyBen/tbsky/issues.
+Questions: open an issue at https://github.com/TechyBen/skytreeone/issues.
