@@ -12,6 +12,16 @@ chrome.storage.sync.get(SKYTREE_DEFAULTS).then(cfg => {
     } else if (el.tagName === 'SELECT') {
       el.value = cfg[key];
       el.addEventListener('change', () => chrome.storage.sync.set({ [key]: el.value }));
+    } else if (key === 'location') {
+      el.value = cfg[key];
+      const note = document.getElementById('location-note'), said = note.textContent;
+      el.addEventListener('change', () => {
+        const at = skytreeLocation(el.value);
+        if (el.value.trim() && !at) { note.textContent = 'Type it as two numbers, like 51.5, -0.1'; return; }
+        note.textContent = said;
+        el.value = at ? `${at.lat}, ${at.lon}` : '';
+        chrome.storage.sync.set({ location: el.value });
+      });
     } else if (el.type === 'text') {
       el.value = cfg[key];
       el.addEventListener('change', () => chrome.storage.sync.set({ [key]: el.value.trim().replace(/^@/, '') }));

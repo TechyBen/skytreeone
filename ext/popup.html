@@ -35,6 +35,10 @@
     <option value="sparse">Sparse: the original open woods</option>
   </select>
 </label>
+<label class="check"><input type="checkbox" id="flowers"> Wildflowers</label>
+<div class="note">The ones in flower near you this time of year, from iNaturalist records.</div>
+<label>Location<input type="text" id="location" placeholder="lat, lon (blank: from your time zone)" spellcheck="false"></label>
+<div class="note" id="location-note" style="margin-left: 0;">For the sun, the seasons and the flowers. Rounded to 0.1° and only used inside the forest page.</div>
 <label class="check"><input type="checkbox" id="sound"> Sound</label>
 <div class="note">Starts after your next click on Bluesky.</div>
 <label>Volume <output for="vol"></output><input type="range" id="vol" min="0" max="100" step="5"></label>

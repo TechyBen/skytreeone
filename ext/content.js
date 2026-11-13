@@ -32,6 +32,10 @@
       px: cfg.px, fps: cfg.fps, realsun: 1, weather: 0, style: cfg.style,
       chatter: cfg.chatter && who ? 1 : 0, me: cfg.chatter ? who : '', parent: location.origin,
     });
+    if (!cfg.flowers) q.set('flowers', 0);
+    // A place typed in the popup; otherwise the forest guesses from the time zone.
+    const at = skytreeLocation(cfg.location);
+    if (at) { q.set('lat', at.lat); q.set('lon', at.lon); }
     return `${BASE}?${q.toString().replace('saver=', 'saver')}`;
   }
 

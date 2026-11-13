@@ -22,6 +22,7 @@ The demo (the forest page opened with `demo=1`, see the README) uses none of the
 ## Settings and location
 
 - Your settings (sound, volume, scene length, an optional handle and so on) are kept in your browser's extension storage (`chrome.storage.sync`), which your browser may sync between your own devices if you're signed in to it.
-- The sun, moon and stars use an approximate location estimated on your device from its time zone. It never leaves your device.
+- The sun, moon, stars, seasons and wildflowers use an approximate location estimated on your device from its time zone. If you type a location in the popup instead, it's rounded to 0.1° and kept with your other settings. Either way it's only used inside the forest page and is never sent anywhere.
+- The wildflowers come from a table built into the extension (from iNaturalist records); nothing is looked up online.
 
 Questions: open an issue at https://github.com/TechyBen/skytreeone/issues.
