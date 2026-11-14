@@ -13,14 +13,27 @@ chrome.storage.sync.get(SKYTREE_DEFAULTS).then(cfg => {
       el.value = cfg[key];
       el.addEventListener('change', () => chrome.storage.sync.set({ [key]: el.value }));
     } else if (key === 'location') {
+      // A town from the forest's built-in list, or "lat, lon": looked up
+      // here, never online. Only the rounded position reaches the forest.
       el.value = cfg[key];
       const note = document.getElementById('location-note'), said = note.textContent;
-      el.addEventListener('change', () => {
-        const at = skytreeLocation(el.value);
-        if (el.value.trim() && !at) { note.textContent = 'Type it as two numbers, like 51.5, -0.1'; return; }
-        note.textContent = said;
-        el.value = at ? `${at.lat}, ${at.lon}` : '';
-        chrome.storage.sync.set({ location: el.value });
+      el.addEventListener('change', async () => {
+        const text = el.value.trim();
+        if (!text) {
+          note.textContent = said;
+          chrome.storage.sync.set({ location: '', lat: null, lon: null });
+          return;
+        }
+        const { findPlace } = await import('./tree/src/cities.js');
+        const at = await findPlace(text);
+        if (!at) {
+          note.textContent = 'Not in the built-in list (towns of 15,000+). Try a bigger town nearby, or lat, lon like 51.5, -0.1.';
+          return;
+        }
+        el.value = at.label;
+        const pos = `${at.lat}, ${at.lon}`;
+        note.textContent = `${at.label === pos ? pos : `${at.label}: ${pos}`}. Only this rounded position is used.`;
+        chrome.storage.sync.set({ location: at.label, lat: at.lat, lon: at.lon });
       });
     } else if (el.type === 'text') {
       el.value = cfg[key];

@@ -53,7 +53,8 @@ def main():
 
     orbit = TREE / 'vendor' / 'OrbitControls.js'
     orbit.write_text(rewrite(orbit.read_text('utf-8'), {'three': './three.module.js'}), 'utf-8', newline='\n')
-    shutil.copy(WEB / 'licenses' / 'd3-celestial.txt', ROOT / 'ext' / 'licenses' / 'd3-celestial.txt')
+    for lic in ('d3-celestial.txt', 'geonames.txt'):
+        shutil.copy(WEB / 'licenses' / lic, ROOT / 'ext' / 'licenses' / lic)
 
     left = [str(p.relative_to(ROOT)) for p in TREE.rglob('*.js')
             if re.search(r"""from\s+['"](three|lil-gui)['"/]""", p.read_text('utf-8'))]

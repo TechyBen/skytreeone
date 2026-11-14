@@ -22,7 +22,8 @@ The demo (the forest page opened with `demo=1`, see the README) uses none of the
 ## Settings and location
 
 - Your settings (sound, volume, scene length, an optional handle and so on) are kept in your browser's extension storage (`chrome.storage.sync`), which your browser may sync between your own devices if you're signed in to it.
-- The sun, moon, stars, seasons and wildflowers use an approximate location estimated on your device from its time zone. If you type a location in the popup instead, it's rounded to 0.1° and kept with your other settings. Either way it's only used inside the forest page and is never sent anywhere.
+- The sun, moon, stars, seasons and wildflowers use an approximate location estimated on your device from its time zone. If you type a town or coordinates in the popup instead, the town is found in a list built into the extension (nothing is searched online), and its position is rounded to 0.1° (about 10 km) and kept with your other settings. Unless you turn on live weather, the location is only used inside the forest page and is never sent anywhere.
+- **Live weather** (off by default): the forest asks [Open-Meteo](https://open-meteo.com/) for the current weather at that rounded position, about every 30 minutes. The request carries only the rounded latitude and longitude, nothing about you or your Bluesky account; Open-Meteo's own terms and privacy policy apply to it. The last reading is cached in the extension's local storage.
 - The wildflowers come from a table built into the extension (from iNaturalist records); nothing is looked up online.
 
 Questions: open an issue at https://github.com/TechyBen/skytreeone/issues.

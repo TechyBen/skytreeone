@@ -29,12 +29,12 @@
     const q = new URLSearchParams({
       // Sound starts off; it's switched live by message (see sendSound).
       saver: '', audio: 0, mins: cfg.mins,
-      px: cfg.px, fps: cfg.fps, realsun: 1, weather: 0, style: cfg.style,
+      px: cfg.px, fps: cfg.fps, realsun: 1, weather: cfg.weather ? 1 : 0, style: cfg.style,
       chatter: cfg.chatter && who ? 1 : 0, me: cfg.chatter ? who : '', parent: location.origin,
     });
     if (!cfg.flowers) q.set('flowers', 0);
     // A place typed in the popup; otherwise the forest guesses from the time zone.
-    const at = skytreeLocation(cfg.location);
+    const at = Number.isFinite(cfg.lat) && Number.isFinite(cfg.lon) ? { lat: cfg.lat, lon: cfg.lon } : skytreeLocation(cfg.location);
     if (at) { q.set('lat', at.lat); q.set('lon', at.lon); }
     return `${BASE}?${q.toString().replace('saver=', 'saver')}`;
   }

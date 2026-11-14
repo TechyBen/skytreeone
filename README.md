@@ -42,7 +42,8 @@ Then open [http://localhost:8174/tree/index.html?saver&demo=1&wander=1](http://l
 | Forest behind Bluesky | on | Switching off restores Bluesky exactly |
 | Forest style | Dense | **Dense**: closer stands with trails, hillsides, ferns and moss (dense versions of the original scenes, plus Fern Hollow and Moss Ravine). **Sparse**: the original open woods around a wide clearing |
 | Wildflowers | on | The species in flower near you at this time of year, from iNaturalist records built into the extension (nothing is looked up online) |
-| Location | blank | `lat, lon` for the sun, seasons and wildflowers, rounded to 0.1°. Blank guesses from your time zone |
+| Location | blank | A town (`Köln`, `Portland, US`) or `lat, lon`, for the sun, seasons, wildflowers and weather. Towns come from a list built into the extension (34,000 towns of 15,000+ people, from [GeoNames](https://www.geonames.org), CC BY 4.0), so nothing is searched online; only the position rounded to 0.1° is kept. Blank guesses from your time zone |
+| Live weather | off | Rain, snow, cloud, fog and wind from [Open-Meteo](https://open-meteo.com/) for your location, refreshed every 30 minutes |
 | Birds from people I follow | on | Live posts land in the trees as birds |
 | Whose follows | blank | Blank uses the account signed in to bsky.app; type a handle to use someone else's follows |
 | Sound | off | Wind and birds. Browsers only start audio after a click, so it starts on your next click on Bluesky, and pauses while the tab is hidden |

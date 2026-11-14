@@ -37,8 +37,10 @@
 </label>
 <label class="check"><input type="checkbox" id="flowers"> Wildflowers</label>
 <div class="note">The ones in flower near you this time of year, from iNaturalist records.</div>
-<label>Location<input type="text" id="location" placeholder="lat, lon (blank: from your time zone)" spellcheck="false"></label>
-<div class="note" id="location-note" style="margin-left: 0;">For the sun, the seasons and the flowers. Rounded to 0.1° and only used inside the forest page.</div>
+<label>Location<input type="text" id="location" placeholder="a town, or lat, lon" spellcheck="false"></label>
+<div class="note" id="location-note" style="margin-left: 0;">For the sun, seasons, flowers and weather; blank guesses from your time zone. Towns come from a list built into the extension, so nothing is searched online.</div>
+<label class="check"><input type="checkbox" id="weather"> Live weather</label>
+<div class="note">Rain, snow, cloud and wind from Open-Meteo for your location, rounded to about 10 km. That rounded position is all that's sent.</div>
 <label class="check"><input type="checkbox" id="sound"> Sound</label>
 <div class="note">Starts after your next click on Bluesky.</div>
 <label>Volume <output for="vol"></output><input type="range" id="vol" min="0" max="100" step="5"></label>

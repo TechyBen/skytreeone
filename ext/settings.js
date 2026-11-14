@@ -13,10 +13,14 @@ const SKYTREE_DEFAULTS = {
   chatter: true, // posts from people you follow arrive as birds
   handle: '',    // whose follows; blank = the account signed in to bsky.app
   flowers: true, // wildflowers for the place and time of year
-  location: '',  // "lat, lon" for the sun, seasons and flowers; blank = guessed from the time zone
+  location: '',  // the place as shown in the popup: a town ("Köln, DE") or "lat, lon"; blank = guessed from the time zone
+  lat: null,     // its position, rounded to 0.1 degrees (set by the popup)
+  lon: null,
+  weather: false, // live weather from Open-Meteo for that place
 };
 
-// "51.5, -0.1" -> {lat, lon} rounded to 0.1 degrees, or null if blank or unreadable.
+// "51.5, -0.1" -> {lat, lon} rounded to 0.1 degrees, or null if blank or unreadable
+// (also reads locations saved before towns could be typed).
 // eslint-disable-next-line no-unused-vars
 function skytreeLocation(text) {
   const m = String(text || '').trim().match(/^(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)$/);
@@ -28,4 +32,4 @@ function skytreeLocation(text) {
 
 // Settings that change the forest page itself (the rest only restyle Bluesky).
 // eslint-disable-next-line no-unused-vars
-const SKYTREE_RELOAD = ['enabled', 'style', 'mins', 'px', 'fps', 'chatter', 'handle', 'flowers', 'location'];
+const SKYTREE_RELOAD = ['enabled', 'style', 'mins', 'px', 'fps', 'chatter', 'handle', 'flowers', 'lat', 'lon', 'weather'];
