@@ -13,7 +13,16 @@ A sibling of [fightskyone](https://github.com/TechyBen/fightskyone) (a PS1 sky b
 | ![Fern Hollow at midday, sun through the trunks](docs/sun-fern-hollow.png) | ![Misty Dawn (dense) in falling snow](docs/snow-misty-dawn.png) |
 | ![Golden Sunrise (dense), birds in the undergrowth](docs/sun-golden-sunrise.png) | ![Ember Oak (dense) in snow](docs/snow-ember-oak.png) |
 
-The snow uses playtreeone's own weather settings (manual snow, cloud and visibility); the extension doesn't switch weather on yet. The birds with a soft green glow are ones you've seen, and blue ones you've read.
+Wildflowers are the ones recorded in flower near you at this time of year (from [iNaturalist](https://www.inaturalist.org)), so the forest floor changes with the place and the season:
+
+| Wildflowers | |
+|---|---|
+| ![London in May: herb Robert, lesser celandine, deadnettles and daisies](docs/flowers-london-may.png) | ![California in April: blue dicks, Ithuriel's spear, milk thistle and clover](docs/flowers-california-april.png) |
+| **London, May** | **California, April** |
+| ![The Alps in July: fireweed, herb Robert and marsh marigold](docs/flowers-alps-july.png) | ![Borneo in February: flame lilies, orchids and periwinkle](docs/flowers-borneo.png) |
+| **Alps, July** | **Borneo, February** |
+
+The snow uses playtreeone's own weather settings (manual snow, cloud and visibility); in the extension, **Live weather** in the popup brings in the real weather where you are. The birds with a soft green glow are ones you've seen, and blue ones you've read.
 
 ## Install (unpacked)
 
